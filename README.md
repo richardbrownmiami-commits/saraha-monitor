@@ -1,2 +1,1 @@
-# saraha-monitor
-Saraha Monitor - admin dashboard for brain activity and /evolve approval
+# Saraha Monitor\n\nAdmin dashboard for Saraha Brain activity and /evolve approval.\n\n- **URL**: https://saraha-monitor.richard-brown-miami.workers.dev\n- **Password**: `itsgood`\n- **D1 DB**: saraha-brain-db (same as brain)\n
