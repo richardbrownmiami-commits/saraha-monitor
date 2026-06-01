@@ -1,3 +1,19 @@
+const MONITOR_TABLES = [
+  `CREATE TABLE IF NOT EXISTS monitor_knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, content TEXT NOT NULL, category TEXT DEFAULT 'general', source TEXT DEFAULT 'seed', created_at TEXT DEFAULT (datetime('now')))`,
+];
+
+const MONITOR_SEED = [
+  { k: "dashboard_overview", c: "Overview tab shows summary stats: total proposals, anti-patterns, kill switch status, recent cycles.", cat: "display" },
+  { k: "dashboard_proposals", c: "Proposals tab lists all proposals with risk badges, expandable details, and approve/deny buttons for pending items.", cat: "display" },
+  { k: "dashboard_activity", c: "Activity tab shows brain logs filtered to auto/propose/research/duplicate/error steps.", cat: "display" },
+  { k: "dashboard_kill", c: "Kill Switch tab toggles brain idle cycle on/off. When on, brain skips all autonomous cycles.", cat: "display" },
+  { k: "api_summary", c: "GET /api/summary returns proposals grouped by status, kill switch state, last activity, and anti-pattern count.", cat: "api" },
+  { k: "api_kill", c: "GET /api/kill-switch returns current state. POST /api/kill-switch with {active:bool} to toggle.", cat: "api" },
+  { k: "api_proposals", c: "GET /api/proposals lists proposals. GET /api/proposals/:id returns detail + receipts. Supports ?status= filter.", cat: "api" },
+  { k: "api_proposals_approve", c: "POST /api/proposals/approve/:id proxies to brain. POST /api/proposals/deny/:id proxies to brain.", cat: "api" },
+  { k: "api_activity", c: "GET /api/activity returns brain_logs filtered to idle cycle steps.", cat: "api" },
+];
+
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
 });
@@ -9,6 +25,12 @@ const html = (body, status = 200) => new Response(body, {
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
+    try {
+      for (const item of MONITOR_SEED) {
+        await env.DB.prepare("INSERT OR IGNORE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run();
+      }
+    } catch {}
 
     if (url.pathname === "/status") {
       let dbOk = false, brainOk = false;
@@ -54,15 +76,11 @@ export default {
 
     if (url.pathname.startsWith("/api/proposals/approve/")) {
       const id = url.pathname.split("/")[4];
-      const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
-      const data = await r.json();
-      return json(data, r.status);
+      try { const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" }); const data = await r.json(); return json(data, r.status); } catch (e) { return json({ error: e.message }, 502); }
     }
     if (url.pathname.startsWith("/api/proposals/deny/")) {
       const id = url.pathname.split("/")[4];
-      const r = await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" });
-      const data = await r.json();
-      return json(data, r.status);
+      try { const r = await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" }); const data = await r.json(); return json(data, r.status); } catch (e) { return json({ error: e.message }, 502); }
     }
 
     if (url.pathname.startsWith("/api/proposals/")) {
@@ -77,6 +95,23 @@ export default {
     if (url.pathname === "/api/activity") {
       const r = await env.DB.prepare("SELECT * FROM brain_logs WHERE step IN ('auto','propose','research','duplicate','error') ORDER BY created_at DESC LIMIT 50").all();
       return json({ entries: r.results });
+    }
+
+    if (url.pathname === "/api/knowledge") {
+      const q = url.searchParams.get("q");
+      const cat = url.searchParams.get("category");
+      let results;
+      if (q) {
+        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge WHERE content LIKE ?1 OR key LIKE ?1 LIMIT 10").bind("%" + q + "%").all();
+        results = r.results;
+      } else if (cat) {
+        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge WHERE category=?1 ORDER BY key LIMIT 20").bind(cat).all();
+        results = r.results;
+      } else {
+        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge ORDER BY category, key LIMIT 50").all();
+        results = r.results;
+      }
+      return json({ entries: results });
     }
 
     return html(DASHBOARD_HTML);
@@ -127,13 +162,15 @@ pre{background:#0F172A;padding:12px;border-radius:6px;font-size:12px;color:#94A3
 <button onclick="showTab('proposals')" id="t-proposals">Proposals</button>
 <button onclick="showTab('activity')" id="t-activity">Activity</button>
 <button onclick="showTab('kill')" id="t-kill">Kill Switch</button>
+<button onclick="showTab('knowledge')" id="t-knowledge">Knowledge</button>
 </div>
 <div id="tab-overview" class="tab active"><div class="row" id="stats"></div><div class="card"><h2 style="font-size:14px;color:#94A3B8;margin-bottom:8px">Recent Brain Activity</h2><div id="recent-activity"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-activity" class="tab"><div id="log-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:40px"><h2 style="font-size:18px;margin-bottom:16px" id="kill-status">Kill Switch</h2><p style="color:#94A3B8;font-size:13px;margin-bottom:20px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div></div>
+<div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
 <script>
-const PAGES={overview,proposals,activity};
+const PAGES={overview,proposals,activity,knowledge};
 let curTab="overview";
 function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
 async function api(p){const r=await fetch(p);if(!r.ok)throw await r.text();return r.json()}
@@ -172,6 +209,15 @@ function activity(){
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity logs</div></div>';return}
     el.innerHTML="<table><tr><th>Step</th><th>Content</th><th>Time</th></tr>"+d.entries.map(e=>"<tr><td><span class='badge badge-"+e.step+"'>"+(e.step||"")+"</span></td><td>"+(e.content||"").slice(0,100)+"</td><td style='font-size:11px'>"+(e.created_at||"").slice(0,19)+"</td></tr>").join("")+"</table>";
   }).catch(()=>document.getElementById("log-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
+}
+function knowledge(){
+  api("/api/knowledge").then(d=>{
+    const el=document.getElementById("knowledge-list");
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No knowledge entries</div></div>';return}
+    let cats={};d.entries.map(e=>{if(!cats[e.category])cats[e.category]=[];cats[e.category].push(e)});
+    let h="";Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:14px;color:#38BDF8;margin-bottom:8px;text-transform:capitalize">'+c+'</h2><table><tr><th>Key</th><th>Content</th></tr>';cats[c].map(e=>{h+='<tr><td style="font-size:11px;color:#94A3B8;white-space:nowrap">'+e.key+'</td><td>'+e.content+'</td></tr>'});h+="</table></div>"});
+    el.innerHTML=h;
+  }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
 }
 async function toggleKill(){
   const btn=document.getElementById("kill-btn");btn.disabled=true;
