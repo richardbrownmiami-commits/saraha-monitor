@@ -52,6 +52,19 @@ export default {
       return json({ entries: r.results });
     }
 
+    if (url.pathname.startsWith("/api/proposals/approve/")) {
+      const id = url.pathname.split("/")[4];
+      const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
+      const data = await r.json();
+      return json(data, r.status);
+    }
+    if (url.pathname.startsWith("/api/proposals/deny/")) {
+      const id = url.pathname.split("/")[4];
+      const r = await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" });
+      const data = await r.json();
+      return json(data, r.status);
+    }
+
     if (url.pathname.startsWith("/api/proposals/")) {
       const id = parseInt(url.pathname.split("/")[3]);
       if (!id) return json({ error: "invalid id" }, 400);
@@ -66,6 +79,110 @@ export default {
       return json({ entries: r.results });
     }
 
-    return html("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><title>Saraha Monitor</title></head><body><h1>Saraha Monitor</h1><p>API is running.</p></body></html>");
+    return html(DASHBOARD_HTML);
   }
 };
+
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saraha Monitor</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0F172A;color:#E2E8F0;font-family:sans-serif;padding:20px;max-width:1100px;margin:0 auto}
+h1{color:#38BDF8;font-size:24px;margin-bottom:4px}.sub{color:#94A3B8;font-size:13px;margin-bottom:20px}
+.nav{display:flex;gap:4px;margin-bottom:20px;flex-wrap:wrap}
+.nav button{padding:8px 16px;border:1px solid #334155;background:#1E293B;color:#94A3B8;border-radius:6px;cursor:pointer;font-size:13px}
+.nav button.active{background:#38BDF8;color:#0F172A;border-color:#38BDF8;font-weight:600}
+.nav button:hover{background:#334155}
+.card{background:#1E293B;border-radius:8px;padding:16px;margin-bottom:16px;border:1px solid #334155}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.stat{flex:1;min-width:140px;text-align:center;padding:16px}
+.stat .v{font-size:28px;font-weight:700;color:#38BDF8}
+.stat .l{font-size:11px;color:#94A3B8;margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#94A3B8;padding:8px 6px;border-bottom:1px solid #334155;font-size:11px;text-transform:uppercase}
+td{padding:8px 6px;border-bottom:1px solid #1E293B;vertical-align:top}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-pending{background:#78350F;color:#FBBF24}.badge-approved{background:#065F46;color:#6EE7B7}
+.badge-denied{background:#7F1D1D;color:#FCA5A5}.badge-auto{background:#312E81;color:#A5B4FC}
+.badge-executed{background:#14532D;color:#86EFAC}.badge-human{background:#7F1D1D;color:#FCA5A5}
+.btn{padding:4px 12px;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;margin:2px}
+.btn-app{background:#059669;color:#FFF}.btn-app:hover{background:#10B981}.btn-den{background:#DC2626;color:#FFF}
+.btn-den:hover{background:#EF4444}.btn-tog{padding:6px 16px;border-radius:6px;border:none;cursor:pointer;font-weight:600;font-size:13px}
+.btn-on{background:#DC2626;color:#FFF}.btn-off{background:#059669;color:#FFF}
+.tab{display:none}.tab.active{display:block}
+pre{background:#0F172A;padding:12px;border-radius:6px;font-size:12px;color:#94A3B8;max-height:300px;overflow:auto;white-space:pre-wrap;margin-top:8px}
+.risk{display:inline-block;width:40px;text-align:center;padding:1px 4px;border-radius:3px;font-size:10px;font-weight:700}
+.risk-h{background:#7F1D1D;color:#FCA5A5}.risk-m{background:#78350F;color:#FBBF24}.risk-l{background:#065F46;color:#6EE7B7}
+.expand{display:none;background:#0F172A;padding:10px;border-radius:6px;margin-top:4px;font-size:12px}
+.empty{color:#64748B;text-align:center;padding:20px;font-size:13px}
+</style>
+</head>
+<body>
+<h1>Saraha Monitor</h1>
+<div class="sub" id="sub">Loading...</div>
+<div class="nav">
+<button onclick="showTab('overview')" id="t-overview" class="active">Overview</button>
+<button onclick="showTab('proposals')" id="t-proposals">Proposals</button>
+<button onclick="showTab('activity')" id="t-activity">Activity</button>
+<button onclick="showTab('kill')" id="t-kill">Kill Switch</button>
+</div>
+<div id="tab-overview" class="tab active"><div class="row" id="stats"></div><div class="card"><h2 style="font-size:14px;color:#94A3B8;margin-bottom:8px">Recent Brain Activity</h2><div id="recent-activity"></div></div></div>
+<div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
+<div id="tab-activity" class="tab"><div id="log-list"></div></div>
+<div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:40px"><h2 style="font-size:18px;margin-bottom:16px" id="kill-status">Kill Switch</h2><p style="color:#94A3B8;font-size:13px;margin-bottom:20px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div></div>
+<script>
+const PAGES={overview,proposals,activity};
+let curTab="overview";
+function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
+async function api(p){const r=await fetch(p);if(!r.ok)throw await r.text();return r.json()}
+function overview(){
+  api("/api/summary").then(d=>{
+    document.getElementById("stats").innerHTML=[
+      '<div class="stat card"><div class="v">' + ((d.proposals||[]).reduce(function(s,p){return s+parseInt(p.total||0)},0)) + '</div><div class="l">Total Proposals</div></div>',
+      '<div class="stat card"><div class="v">' + (d.antiPatterns||0) + '</div><div class="l">Anti-Patterns</div></div>',
+      '<div class="stat card"><div class="v">' + (d.killSwitch?"ON":"OFF") + '</div><div class="l">Kill Switch</div></div>',
+      '<div class="stat card"><div class="v">' + ((d.lastActivity||[]).length) + '</div><div class="l">Recent Cycles</div></div>'
+    ].join("");
+    const el=document.getElementById("recent-activity");
+    if(!d.lastActivity||!d.lastActivity.length){el.innerHTML='<div class="empty">No recent activity</div>';return}
+    el.innerHTML="<table><tr><th>Action</th><th>Time</th></tr>"+d.lastActivity.map(e=>"<tr><td>"+(e.content||"").slice(0,80)+"</td><td style='font-size:11px'>"+(e.created_at||"")+"</td></tr>").join("")+"</table>";
+  }).catch(()=>document.getElementById("stats").innerHTML='<div class="empty">Failed to load</div>')
+}
+function proposals(){
+  api("/api/proposals").then(d=>{
+    const el=document.getElementById("prop-list");
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No proposals yet</div></div>';return}
+    let h="<table><tr><th>ID</th><th>Title</th><th>Type</th><th>Risk</th><th>Status</th><th>Actions</th></tr>";
+    d.entries.map(p=>{
+      const riskClass=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
+      const appBtn=p.status==="pending"?'<button class="btn btn-app" onclick=\'app('+p.id+')\'>Approve</button> <button class="btn btn-den" onclick=\'den('+p.id+')\'>Deny</button>':"";
+      h+='<tr><td>'+p.id+'</td><td><a href="#" onclick="event.preventDefault();toggleExpand('+p.id+')" style="color:#38BDF8">'+(p.title||"").slice(0,40)+'</a></td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+riskClass+'">'+(p.risk_pct||0)+'%</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+appBtn+'</td></tr>';
+      h+='<tr id="expand-'+p.id+'" class="expand"><td colspan="6"><strong>What:</strong> '+(p.what_diff||"-")+'<br><strong>How:</strong> '+(p.how_diff||"-")+'<br><strong>Created:</strong> '+(p.created_at||"")+'</td></tr>';
+    });h+="</table>";el.innerHTML=h;
+  }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
+}
+function toggleExpand(id){const el=document.getElementById("expand-"+id);el.style.display=el.style.display==="table-row"?"none":"table-row"}
+async function app(id){try{await api("/api/proposals/approve/"+id);proposals()}catch{}}
+async function den(id){try{await api("/api/proposals/deny/"+id);proposals()}catch{}}
+function activity(){
+  api("/api/activity").then(d=>{
+    const el=document.getElementById("log-list");
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity logs</div></div>';return}
+    el.innerHTML="<table><tr><th>Step</th><th>Content</th><th>Time</th></tr>"+d.entries.map(e=>"<tr><td><span class='badge badge-"+e.step+"'>"+(e.step||"")+"</span></td><td>"+(e.content||"").slice(0,100)+"</td><td style='font-size:11px'>"+(e.created_at||"").slice(0,19)+"</td></tr>").join("")+"</table>";
+  }).catch(()=>document.getElementById("log-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
+}
+async function toggleKill(){
+  const btn=document.getElementById("kill-btn");btn.disabled=true;
+  try{const s=await api("/api/kill-switch");const r=await fetch("/api/kill-switch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({active:!s.active})});const d=await r.json();renderKill(d.active)}catch{}btn.disabled=false;
+}
+function renderKill(active){
+  document.getElementById("kill-status").textContent=active?"Kill Switch: ON":"Kill Switch: OFF";
+  const btn=document.getElementById("kill-btn");btn.textContent=active?"Turn OFF":"Turn ON";btn.className="btn-tog "+(active?"btn-on":"btn-off");
+}
+api("/api/kill-switch").then(d=>renderKill(d.active)).catch(()=>{});
+overview();setInterval(()=>{PAGES[curTab]&&PAGES[curTab]()},10000);
+</script>
+</body>
+</html>`;
