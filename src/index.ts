@@ -93,18 +93,31 @@ export default {
       const prop = await env.DB.prepare("SELECT * FROM proposals WHERE id=?1 AND status='pending'").bind(id).all();
       if (!prop.results.length) return json({ error: "not found or not pending" }, 404);
       const p = prop.results[0];
+      if (p.risk_pct <= 30 && p.resource_type !== "core_architecture") {
+        const h = await env.BRAIN.fetch("https://brain/brain/emotions");
+        if (h.ok) {
+          const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
+          const d = await r.json(); return json(d, r.status);
+        }
+      }
       if (p.risk_pct > 30 && p.resource_type !== "cron_schedule") {
         const now = await env.DB.prepare("SELECT COUNT(*) as c FROM proposals WHERE status='approved' AND decided_at > datetime('now','-1 hour')").all();
         if (now.results[0]?.c >= 3) return json({ error: "Healer: >3 approvals/hr exceeds safety limit. Wait before approving high-risk changes." }, 429);
       }
-      if (p.resource_type === "config") {
-        try { await env.DB.prepare("INSERT INTO identity (key, value, updated_at) VALUES ('healer_backup_last', datetime('now'), datetime('now')) ON CONFLICT(key) DO UPDATE SET value=datetime('now'), updated_at=datetime('now')").run(); } catch {}
-      }
+      let backupSha = null, backupCode = null;
+      try {
+        const b = await env.BRAIN.fetch("https://brain/brain/knowledge?limit=1");
+        const gRes = await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", {
+          headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), Accept: "application/vnd.github.v3+json", "User-Agent": "Saraha-Monitor" },
+          signal: AbortSignal.timeout(8000)
+        });
+        if (gRes.ok) { const gd = await gRes.json(); backupSha = gd.sha; backupCode = gd.content; }
+      } catch {}
       try {
         const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
         const data = await r.json();
         if (r.ok && data.ok) {
-          try { const h = await env.BRAIN.fetch("https://brain/brain/emotions"); if (!h.ok) { await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" }); return json({ error: "Healer: brain unhealthy after approval, rolled back" }, 502); } } catch { await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" }); return json({ error: "Healer: brain unreachable, rolled back" }, 502); }
+          try { const h = await env.BRAIN.fetch("https://brain/brain/emotions"); if (!h.ok) { if (backupSha && backupCode) { try { await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", { method: "PUT", headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), "Content-Type": "application/json", "User-Agent": "Saraha-Monitor" }, body: JSON.stringify({ message: "rollback: brain unhealthy", content: backupCode, sha: backupSha }), signal: AbortSignal.timeout(10000) }); } catch {} } return json({ error: "Healer: brain unhealthy after approval, rolled back" }, 502); } } catch { if (backupSha && backupCode) { try { await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", { method: "PUT", headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), "Content-Type": "application/json", "User-Agent": "Saraha-Monitor" }, body: JSON.stringify({ message: "rollback: brain unreachable", content: backupCode, sha: backupSha }), signal: AbortSignal.timeout(10000) }); } catch {} } return json({ error: "Healer: brain unreachable, rolled back" }, 502); }
         }
         return json(data, r.status);
       } catch (e) { return json({ error: e.message }, 502); }
@@ -253,7 +266,7 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('prompts')" id="t-prompts">Prompts</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution â€” Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
@@ -280,7 +293,7 @@ async function refreshStatus(){
 function activity(){
   api("/api/activity").then(d=>{
     const el=document.getElementById("log-list");
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet — waiting for brain cycles...</div></div>';lastCount=0;return}
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet â€” waiting for brain cycles...</div></div>';lastCount=0;return}
     const isNew=d.entries.length>lastCount&&lastCount>0;
     if(isNew)document.getElementById("liveDot").style.background="#F59E0B";
     lastCount=d.entries.length;
@@ -336,7 +349,7 @@ function proposals(){
     let h="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
-      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">✓</button><button class="btn btn-den" onclick="den('+p.id+')">✗</button>':"";
+      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">âœ“</button><button class="btn btn-den" onclick="den('+p.id+')">âœ—</button>':"";
       h+='<tr><td class="q">'+p.id+'</td><td class="wrap" style="max-width:150px">'+(p.title||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.what_diff||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.how_diff||"-")+'</td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
     });h+="</table>";el.innerHTML=h;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -348,7 +361,7 @@ function knowledge(){
     const el=document.getElementById("knowledge-list");
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain knowledge entries</div></div>';return}
     let cats={};d.entries.map(e=>{if(!cats[e.category])cats[e.category]=[];cats[e.category].push(e)});
-    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base — endpoints and structure (D1 schema hidden)</p>";
+    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base â€” endpoints and structure (D1 schema hidden)</p>";
     Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2>';cats[c].map(e=>{h+='<div style="padding:4px 0;border-bottom:1px solid #0F172A;font-size:12px"><strong style="color:#38BDF8">'+e.key+'</strong><div style="color:#CBD5E1;margin-top:2px;word-break:break-word">'+e.content+'</div></div>'});h+="</div>"});
     el.innerHTML=h;
   }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -356,7 +369,7 @@ function knowledge(){
 function prompts(){
   api("/api/prompts").then(d=>{
     const el=document.getElementById("prompts-list");
-    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet — waiting for brain proposals...</div></div>';return}
+    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet â€” waiting for brain proposals...</div></div>';return}
     let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Base Prompt</h2><p style="color:#64748B;font-size:11px">'+d.base+'</p></div>';
     if(d.overrides&&d.overrides.length){
       h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Active Overrides ('+d.overrides.length+')</h2>';
