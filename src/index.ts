@@ -33,7 +33,7 @@ export default {
     try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
     try {
       for (const item of MONITOR_SEED) {
-        await env.DB.prepare("INSERT OR IGNORE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run();
+        await env.DB.prepare("INSERT OR REPLACE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run();
       }
     } catch {}
 
@@ -124,7 +124,7 @@ export default {
     }
 
     if (url.pathname === "/api/activity") {
-      const r = await env.DB.prepare("SELECT * FROM brain_logs WHERE step IN ('auto','propose','research','duplicate','error') ORDER BY created_at DESC LIMIT 50").all();
+      const r = await env.DB.prepare("SELECT * FROM brain_logs WHERE step IN ('auto','propose','research','duplicate','executor','error') ORDER BY created_at DESC LIMIT 50").all();
       return json({ entries: r.results });
     }
 
@@ -147,7 +147,7 @@ export default {
     }
 
     if (url.pathname === "/api/evolution") {
-      const c = await env.DB.prepare("SELECT COUNT(*) as total FROM authority_receipts WHERE outcome='success' AND approved_by='auto'").all();
+      const c = await env.DB.prepare("SELECT COUNT(*) as total FROM authority_receipts WHERE outcome='success' AND (approved_by='auto' OR approved_by='human')").all();
       const items = await env.DB.prepare("SELECT p.title, p.resource_type, p.executed_at FROM proposals p JOIN authority_receipts r ON p.id=r.proposal_id WHERE r.outcome='success' ORDER BY p.executed_at DESC LIMIT 20").all();
       return json({ count: c.results[0]?.total || 0, entries: items.results });
     }
@@ -331,7 +331,6 @@ function proposals(){
     });h+="</table>";el.innerHTML=h;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
 }
-function toggleExpand(id){const el=document.getElementById("expand-"+id);el.style.display=el.style.display==="table-row"?"none":"table-row"}
 async function app(id){try{await api("/api/proposals/approve/"+id);proposals()}catch{}}
 async function den(id){try{await api("/api/proposals/deny/"+id);proposals()}catch{}}
 function knowledge(){
