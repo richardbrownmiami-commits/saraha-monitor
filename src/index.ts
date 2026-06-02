@@ -245,7 +245,7 @@ function proposals(){
     let h="<table><tr><th>ID</th><th>Title</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
-      const ab=p.status==="pending"?'<button class="btn btn-app" onclick=\'app('+p.id+')\'>✓</button><button class="btn btn-den" onclick=\'den('+p.id+')\'>✗</button>':"";
+      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">✓</button><button class="btn btn-den" onclick="den('+p.id+')">✗</button>':"";
       h+='<tr><td class="q">'+p.id+'</td><td><a href="#" onclick="event.preventDefault();toggleExpand('+p.id+')" style="color:#38BDF8;text-decoration:none;font-size:12px">'+(p.title||"").slice(0,35)+'</a></td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
       h+='<tr id="expand-'+p.id+'" class="expand"><td colspan="6"><strong>What:</strong> '+(p.what_diff||"-")+'<br><strong>How:</strong> '+(p.how_diff||"-")+'<br><span class="q">'+(p.created_at||"")+'</span></td></tr>';
     });h+="</table>";el.innerHTML=h;
