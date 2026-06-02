@@ -162,6 +162,14 @@ export default {
       return json({ entries: results });
     }
 
+    if (url.pathname === "/api/prompts") {
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/prompts");
+        if (r.ok) return json(await r.json());
+      } catch {}
+      return json({ base: "", overrides: [], changes: [] });
+    }
+
     return html(DASHBOARD_HTML);
   }
 };
@@ -242,14 +250,16 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('proposals')" id="t-proposals">Proposals</button>
 <button onclick="showTab('kill')" id="t-kill">Kill Switch</button>
 <button onclick="showTab('knowledge')" id="t-knowledge">Knowledge</button>
+<button onclick="showTab('prompts')" id="t-prompts">Prompts</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
 <div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
+<div id="tab-prompts" class="tab"><div id="prompts-list"></div></div>
 <script>
-const PAGES={activity,overview,proposals,knowledge};
+const PAGES={activity,overview,proposals,knowledge,prompts};
 let curTab="activity",lastCount=0,statusCache={};
 function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
 async function api(p,o){const r=await fetch(p,o||{});if(!r.ok)throw await r.text();return r.json()}
@@ -342,6 +352,21 @@ function knowledge(){
     Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2>';cats[c].map(e=>{h+='<div style="padding:4px 0;border-bottom:1px solid #0F172A;font-size:12px"><strong style="color:#38BDF8">'+e.key+'</strong><div style="color:#CBD5E1;margin-top:2px;word-break:break-word">'+e.content+'</div></div>'});h+="</div>"});
     el.innerHTML=h;
   }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
+}
+function prompts(){
+  api("/api/prompts").then(d=>{
+    const el=document.getElementById("prompts-list");
+    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet — waiting for brain proposals...</div></div>';return}
+    let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Base Prompt</h2><p style="color:#64748B;font-size:11px">'+d.base+'</p></div>';
+    if(d.overrides&&d.overrides.length){
+      h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Active Overrides ('+d.overrides.length+')</h2>';
+      d.overrides.map(o=>{h+='<div style="padding:6px 0;border-bottom:1px solid #0F172A;font-size:12px"><div><strong>#'+o.from+'</strong> '+o.title+'</div><div style="color:#94A3B8;margin-top:2px">How: '+(o.how||"-")+'</div><div class="q">'+o.applied_at.slice(0,19)+'</div></div>'});
+      h+='</div>';
+    }
+    h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution History ('+d.changes.length+')</h2><table><tr><th>ID</th><th>Title</th><th>Type</th><th>Reason</th><th>Risk</th><th>Status</th><th>When</th></tr>';
+    d.changes.map(c=>{h+='<tr><td class="q">'+c.id+'</td><td class="wrap" style="max-width:150px">'+(c.title||"-")+'</td><td><span class="badge">'+(c.type||"-")+'</span></td><td class="wrap" style="max-width:150px">'+(c.reason||"-")+'</td><td><span class="risk '+(c.risk>60?"risk-h":c.risk>30?"risk-m":"risk-l")+'">'+(c.risk||0)+'</span></td><td><span class="badge badge-'+(c.status==="active"?"executed":"denied")+'">'+(c.status||"-")+'</span></td><td class="q">'+(c.applied_at||"").slice(0,10)+'</td></tr>'});
+    h+="</table></div>";el.innerHTML=h;
+  }).catch(()=>document.getElementById("prompts-list").innerHTML='<div class="card"><div class="empty">Error loading prompts</div></div>')
 }
 async function toggleKill(){
   const btn=document.getElementById("kill-btn");btn.disabled=true;
