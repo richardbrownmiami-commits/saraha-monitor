@@ -44,11 +44,14 @@ export default {
       const kill = await env.DB.prepare("SELECT value FROM identity WHERE key='kill_switch'").all();
       const lastCycle = await env.DB.prepare("SELECT content, created_at FROM brain_logs WHERE step='auto' OR step='propose' ORDER BY created_at DESC LIMIT 5").all();
       const anti = await env.DB.prepare("SELECT COUNT(*) as total FROM anti_patterns").all();
+      let emotions = null;
+      try { const r = await env.BRAIN.fetch("https://brain/brain/emotions"); if (r.ok) emotions = await r.json(); } catch {}
       return json({
         proposals: props.results,
         killSwitch: kill.results[0]?.value === "true",
         lastActivity: lastCycle.results,
-        antiPatterns: anti.results[0]?.total || 0
+        antiPatterns: anti.results[0]?.total || 0,
+        emotions
       });
     }
 
@@ -171,6 +174,13 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 .log-source{color:#475569;font-size:9px;white-space:nowrap;min-width:40px;text-align:right}
 .live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#10B981;animation:pulse 1.5s ease-in-out infinite;margin-right:6px;vertical-align:middle}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.ebar{margin:3px 0;display:flex;align-items:center;gap:6px;font-size:11px}
+.ebar .el{min-width:60px;color:#94A3B8;text-transform:capitalize}
+.ebar .et{flex:1;height:14px;background:#0F172A;border-radius:7px;overflow:hidden}
+.ebar .ef{height:100%;border-radius:7px;transition:width .5s}
+.ef.energetic{background:#F59E0B}.ef.intelligent{background:#3B82F6}.ef.happy{background:#10B981}.ef.bad{background:#EF4444}
+.eg{height:16px;background:#0F172A;border-radius:8px;overflow:hidden;margin:3px 0}
+.efill{height:100%;border-radius:8px;background:linear-gradient(90deg,#EF4444,#F59E0B,#10B981);transition:width .5s}
 </style>
 </head>
 <body>
@@ -184,7 +194,7 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('knowledge')" id="t-knowledge">Knowledge</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:32px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
@@ -236,6 +246,15 @@ function overview(){
     const el=document.getElementById("recent-activity");
     if(!d.lastActivity||!d.lastActivity.length){el.innerHTML='<div class="empty">No recent cycles</div>';return}
     el.innerHTML="<table><tr><th>Action</th><th>Time</th></tr>"+d.lastActivity.map(e=>"<tr><td>"+(e.content||"").slice(0,100)+"</td><td class='q'>"+(e.created_at||"").slice(11,19)+"</td></tr>").join("")+"</table>";
+    const ee=document.getElementById("emotion-box");
+    if(d.emotions&&ee){
+      const em=d.emotions.emotions||{};
+      ee.innerHTML='<div style="font-size:13px;color:#94A3B8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Emotions</div>'+
+        ["energetic","intelligent","happy","bad"].map(k=>'<div class="ebar"><span class="el">'+k+'</span><span class="et"><div class="ef '+k+'" style="width:'+((em[k]||0)*10)+'%"></div></span><span style="color:#64748B;min-width:20px;text-align:right">'+em[k]+'</span></div>').join("")+
+        '<div style="margin-top:6px;font-size:13px;color:#94A3B8">Energy</div>'+
+        '<div class="eg"><div class="efill" style="width:'+(d.emotions.energy||0)+'%"></div></div>'+
+        '<div style="font-size:11px;color:#64748B;margin-top:2px">'+(d.emotions.energy||0)+'% &middot; confidence '+(d.emotions.confidence||0)+'%</div>';
+    }
   }).catch(()=>document.getElementById("stats").innerHTML='<div class="empty">Failed to load</div>')
 }
 function proposals(){
