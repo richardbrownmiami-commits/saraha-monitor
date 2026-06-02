@@ -106,18 +106,14 @@ export default {
       }
       let backupSha = null, backupCode = null;
       try {
-        const b = await env.BRAIN.fetch("https://brain/brain/knowledge?limit=1");
-        const gRes = await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", {
-          headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), Accept: "application/vnd.github.v3+json", "User-Agent": "Saraha-Monitor" },
-          signal: AbortSignal.timeout(8000)
-        });
+        const gRes = await env.BRAIN.fetch("https://brain/brain/github/read?path=src/index.ts");
         if (gRes.ok) { const gd = await gRes.json(); backupSha = gd.sha; backupCode = gd.content; }
       } catch {}
       try {
         const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
         const data = await r.json();
         if (r.ok && data.ok) {
-          try { const h = await env.BRAIN.fetch("https://brain/brain/emotions"); if (!h.ok) { if (backupSha && backupCode) { try { await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", { method: "PUT", headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), "Content-Type": "application/json", "User-Agent": "Saraha-Monitor" }, body: JSON.stringify({ message: "rollback: brain unhealthy", content: backupCode, sha: backupSha }), signal: AbortSignal.timeout(10000) }); } catch {} } return json({ error: "Healer: brain unhealthy after approval, rolled back" }, 502); } } catch { if (backupSha && backupCode) { try { await fetch("https://api.github.com/repos/richardbrownmiami-commits/saraha-brain/contents/src/index.ts", { method: "PUT", headers: { Authorization: "Bearer " + (env.GITHUB_TOKEN || ""), "Content-Type": "application/json", "User-Agent": "Saraha-Monitor" }, body: JSON.stringify({ message: "rollback: brain unreachable", content: backupCode, sha: backupSha }), signal: AbortSignal.timeout(10000) }); } catch {} } return json({ error: "Healer: brain unreachable, rolled back" }, 502); }
+          try { const h = await env.BRAIN.fetch("https://brain/brain/emotions"); if (!h.ok) { if (backupSha && backupCode) { try { await env.BRAIN.fetch("https://brain/brain/github/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "rollback: brain unhealthy", content: backupCode, sha: backupSha }) }); } catch {} } return json({ error: "Healer: brain unhealthy after approval, rolled back" }, 502); } } catch { if (backupSha && backupCode) { try { await env.BRAIN.fetch("https://brain/brain/github/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "rollback: brain unreachable", content: backupCode, sha: backupSha }) }); } catch {} } return json({ error: "Healer: brain unreachable, rolled back" }, 502); }
         }
         return json(data, r.status);
       } catch (e) { return json({ error: e.message }, 502); }
