@@ -12,6 +12,11 @@ const MONITOR_SEED = [
   { k: "api_proposals", c: "GET /api/proposals lists proposals. GET /api/proposals/:id returns detail + receipts. Supports ?status= filter.", cat: "api" },
   { k: "api_proposals_approve", c: "POST /api/proposals/approve/:id proxies to brain. POST /api/proposals/deny/:id proxies to brain.", cat: "api" },
   { k: "api_activity", c: "GET /api/activity returns brain_logs filtered to idle cycle steps.", cat: "api" },
+  { k: "api_master_cron", c: "GET /api/master-cron returns {active,interval_minutes}. POST /api/master-cron with {interval_minutes:N} or {active:false} to disable.", cat: "api" },
+  { k: "api_evolution", c: "GET /api/evolution returns count of auto-executed proposals plus list of evolved titles.", cat: "api" },
+  { k: "dashboard_knowledge", c: "Knowledge tab shows brain's endpoint knowledge (fetched from brain worker, D1 schema hidden).", cat: "display" },
+  { k: "dashboard_master_cron", c: "Master Cron section in Kill Switch tab overrides brain's idle cycle interval. Brain cannot change cron when master cron is active.", cat: "display" },
+  { k: "healer_validation", c: "The approve endpoint validates proposals before forwarding: blocks if >3 high-risk approvals in 1 hour, saves backup timestamps for config changes, checks brain health after approval and rolls back if unhealthy.", cat: "healer" },
 ];
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
@@ -42,8 +47,11 @@ export default {
     if (url.pathname === "/api/summary") {
       const props = await env.DB.prepare("SELECT COUNT(*) as total, status FROM proposals GROUP BY status").all();
       const kill = await env.DB.prepare("SELECT value FROM identity WHERE key='kill_switch'").all();
-      const lastCycle = await env.DB.prepare("SELECT content, created_at FROM brain_logs WHERE step='auto' OR step='propose' ORDER BY created_at DESC LIMIT 5").all();
+      const lastCycle = await env.DB.prepare("SELECT content, created_at FROM brain_logs WHERE step='auto' OR step='propose' OR step='executor' ORDER BY created_at DESC LIMIT 5").all();
       const anti = await env.DB.prepare("SELECT COUNT(*) as total FROM anti_patterns").all();
+      const mc = await env.DB.prepare("SELECT value FROM identity WHERE key='master_cron_minutes'").all();
+      const lc = await env.DB.prepare("SELECT value, updated_at FROM identity WHERE key='last_cycle_time'").all();
+      const execCount = await env.DB.prepare("SELECT COUNT(*) as total FROM authority_receipts WHERE outcome='success'").all();
       let emotions = null;
       try { const r = await env.BRAIN.fetch("https://brain/brain/emotions"); if (r.ok) emotions = await r.json(); } catch {}
       return json({
@@ -51,6 +59,9 @@ export default {
         killSwitch: kill.results[0]?.value === "true",
         lastActivity: lastCycle.results,
         antiPatterns: anti.results[0]?.total || 0,
+        masterCron: { active: !!mc.results[0]?.value, interval: mc.results[0]?.value ? parseInt(mc.results[0].value) : null },
+        lastCycleTime: lc.results[0]?.value || null,
+        executedProposals: execCount.results[0]?.total || 0,
         emotions
       });
     }
@@ -79,7 +90,24 @@ export default {
 
     if (url.pathname.startsWith("/api/proposals/approve/")) {
       const id = url.pathname.split("/")[4];
-      try { const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" }); const data = await r.json(); return json(data, r.status); } catch (e) { return json({ error: e.message }, 502); }
+      const prop = await env.DB.prepare("SELECT * FROM proposals WHERE id=?1 AND status='pending'").bind(id).all();
+      if (!prop.results.length) return json({ error: "not found or not pending" }, 404);
+      const p = prop.results[0];
+      if (p.risk_pct > 30 && p.resource_type !== "cron_schedule") {
+        const now = await env.DB.prepare("SELECT COUNT(*) as c FROM proposals WHERE status='approved' AND decided_at > datetime('now','-1 hour')").all();
+        if (now.results[0]?.c >= 3) return json({ error: "Healer: >3 approvals/hr exceeds safety limit. Wait before approving high-risk changes." }, 429);
+      }
+      if (p.resource_type === "config") {
+        try { await env.DB.prepare("INSERT INTO identity (key, value, updated_at) VALUES ('healer_backup_last', datetime('now'), datetime('now')) ON CONFLICT(key) DO UPDATE SET value=datetime('now'), updated_at=datetime('now')").run(); } catch {}
+      }
+      try {
+        const r = await env.BRAIN.fetch("https://brain/api/proposals/approve/" + id, { method: "POST" });
+        const data = await r.json();
+        if (r.ok && data.ok) {
+          try { const h = await env.BRAIN.fetch("https://brain/brain/emotions"); if (!h.ok) { await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" }); return json({ error: "Healer: brain unhealthy after approval, rolled back" }, 502); } } catch { await env.BRAIN.fetch("https://brain/api/proposals/deny/" + id, { method: "POST" }); return json({ error: "Healer: brain unreachable, rolled back" }, 502); }
+        }
+        return json(data, r.status);
+      } catch (e) { return json({ error: e.message }, 502); }
     }
     if (url.pathname.startsWith("/api/proposals/deny/")) {
       const id = url.pathname.split("/")[4];
@@ -100,20 +128,37 @@ export default {
       return json({ entries: r.results });
     }
 
-    if (url.pathname === "/api/knowledge") {
-      const q = url.searchParams.get("q");
-      const cat = url.searchParams.get("category");
-      let results;
-      if (q) {
-        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge WHERE content LIKE ?1 OR key LIKE ?1 LIMIT 10").bind("%" + q + "%").all();
-        results = r.results;
-      } else if (cat) {
-        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge WHERE category=?1 ORDER BY key LIMIT 20").bind(cat).all();
-        results = r.results;
-      } else {
-        const r = await env.DB.prepare("SELECT key, content, category FROM monitor_knowledge ORDER BY category, key LIMIT 50").all();
-        results = r.results;
+    if (url.pathname === "/api/master-cron" && req.method === "POST") {
+      let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const v = body.interval_minutes;
+      if (body.active === false) {
+        await env.DB.prepare("INSERT INTO identity (key,value,updated_at) VALUES ('master_cron_minutes','',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='',updated_at=datetime('now')").run();
+        return json({ ok: true, active: false });
       }
+      const n = parseInt(v);
+      if (!n || n < 1) return json({ error: "interval_minutes must be >= 1" }, 400);
+      await env.DB.prepare("INSERT INTO identity (key,value,updated_at) VALUES ('master_cron_minutes',?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=?1,updated_at=datetime('now')").bind(n.toString()).run();
+      return json({ ok: true, active: true, interval_minutes: n });
+    }
+    if (url.pathname === "/api/master-cron") {
+      const r = await env.DB.prepare("SELECT value FROM identity WHERE key='master_cron_minutes'").all();
+      const v = r.results[0]?.value;
+      return json({ active: !!v, interval_minutes: v ? parseInt(v) : null });
+    }
+
+    if (url.pathname === "/api/evolution") {
+      const c = await env.DB.prepare("SELECT COUNT(*) as total FROM authority_receipts WHERE outcome='success' AND approved_by='auto'").all();
+      const items = await env.DB.prepare("SELECT p.title, p.resource_type, p.executed_at FROM proposals p JOIN authority_receipts r ON p.id=r.proposal_id WHERE r.outcome='success' ORDER BY p.executed_at DESC LIMIT 20").all();
+      return json({ count: c.results[0]?.total || 0, entries: items.results });
+    }
+
+    if (url.pathname === "/api/knowledge") {
+      let results;
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/knowledge?limit=30");
+        if (r.ok) { const d = await r.json(); results = (d.entries||[]).filter(e => e.key !== "schema_d1_tables"); }
+        else results = [];
+      } catch { results = []; }
       return json({ entries: results });
     }
 
@@ -145,10 +190,15 @@ h1{color:#38BDF8;font-size:20px;margin-bottom:12px;display:flex;align-items:cent
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#64748B;padding:6px 4px;border-bottom:1px solid #334155;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
 td{padding:5px 4px;border-bottom:1px solid #0F172A;vertical-align:top}
+td.wrap{white-space:normal;word-break:break-word;max-width:none}
 .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
 .badge-pending{background:#78350F;color:#FBBF24}.badge-approved{background:#065F46;color:#6EE7B7}
 .badge-denied{background:#7F1D1D;color:#FCA5A5}.badge-auto{background:#312E81;color:#A5B4FC}
 .badge-executed{background:#14532D;color:#86EFAC}.badge-human{background:#7F1D1D;color:#FCA5A5}
+.cron-opt{display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap}
+.cron-opt select{padding:6px 10px;border-radius:6px;border:1px solid #334155;background:#0F172A;color:#E2E8F0;font-size:13px}
+.cron-opt .hint{font-size:11px;color:#64748B}
+.evo-item{padding:6px 0;border-bottom:1px solid #0F172A;font-size:12px}
 .q{color:#64748B;font-size:10px;font-family:monospace}
 .btn{padding:3px 10px;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;margin:1px}
 .btn-app{background:#059669;color:#FFF}.btn-app:hover{background:#10B981}.btn-den{background:#DC2626;color:#FFF}
@@ -194,15 +244,15 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('knowledge')" id="t-knowledge">Knowledge</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
-<div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:32px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div></div>
+<div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
 <script>
 const PAGES={activity,overview,proposals,knowledge};
 let curTab="activity",lastCount=0,statusCache={};
 function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
-async function api(p){const r=await fetch(p);if(!r.ok)throw await r.text();return r.json()}
+async function api(p,o){const r=await fetch(p,o||{});if(!r.ok)throw await r.text();return r.json()}
 async function refreshStatus(){
   try{
     const s=await api("/status");
@@ -241,11 +291,17 @@ function overview(){
       '<div class="stat card"><div class="v">'+total+'</div><div class="l">Proposals</div></div>',
       '<div class="stat card"><div class="v">'+(d.antiPatterns||0)+'</div><div class="l">Anti-Patterns</div></div>',
       '<div class="stat card"><div class="v">'+(d.killSwitch?"ON":"OFF")+'</div><div class="l">Kill Switch</div></div>',
-      '<div class="stat card"><div class="v">'+((d.lastActivity||[]).length)+'</div><div class="l">Recent Cycles</div></div>'
+      '<div class="stat card"><div class="v">'+((d.lastActivity||[]).length)+'</div><div class="l">Recent Cycles</div></div>',
+      '<div class="stat card"><div class="v">'+(d.executedProposals||0)+'</div><div class="l">Executed</div></div>'
     ].join("");
+    const cronInterval = d.masterCron && d.masterCron.active ? "Master: every "+d.masterCron.interval+" min" : "Default: 2 min";
+    const lastCycleStr = d.lastCycleTime ? d.lastCycleTime.slice(0,19) : "never";
+    document.getElementById("cron-card").innerHTML=
+      '<span style="margin-right:16px"><strong style="color:#CBD5E1">Cron:</strong> '+cronInterval+'</span>'+
+      '<span><strong style="color:#CBD5E1">Last cycle:</strong> '+lastCycleStr+'</span>';
     const el=document.getElementById("recent-activity");
     if(!d.lastActivity||!d.lastActivity.length){el.innerHTML='<div class="empty">No recent cycles</div>';return}
-    el.innerHTML="<table><tr><th>Action</th><th>Time</th></tr>"+d.lastActivity.map(e=>"<tr><td>"+(e.content||"").slice(0,100)+"</td><td class='q'>"+(e.created_at||"").slice(11,19)+"</td></tr>").join("")+"</table>";
+    el.innerHTML="<table><tr><th>Action</th><th>Time</th></tr>"+d.lastActivity.map(e=>"<tr><td class='wrap'>"+(e.content||"").slice(0,100)+"</td><td class='q'>"+(e.created_at||"").slice(11,19)+"</td></tr>").join("")+"</table>";
     const ee=document.getElementById("emotion-box");
     if(d.emotions&&ee){
       const em=d.emotions.emotions||{};
@@ -255,18 +311,23 @@ function overview(){
         '<div class="eg"><div class="efill" style="width:'+(d.emotions.energy||0)+'%"></div></div>'+
         '<div style="font-size:11px;color:#64748B;margin-top:2px">'+(d.emotions.energy||0)+'% &middot; confidence '+(d.emotions.confidence||0)+'%</div>';
     }
+    api("/api/evolution").then(ev=>{
+      const el=document.getElementById("evo-list");
+      if(!ev.entries||!ev.entries.length){el.innerHTML='<div class="empty">Nothing evolved yet</div>';return}
+      el.innerHTML='<div style="font-size:11px;color:#94A3B8;margin-bottom:6px">'+ev.count+' successful evolution(s)</div>'+
+        ev.entries.map(e=>'<div class="evo-item">'+(e.title||"-")+' <span class="badge">'+(e.resource_type||"-")+'</span> <span class="q">'+(e.executed_at||"").slice(0,10)+'</span></div>').join("");
+    }).catch(()=>{})
   }).catch(()=>document.getElementById("stats").innerHTML='<div class="empty">Failed to load</div>')
 }
 function proposals(){
   api("/api/proposals").then(d=>{
     const el=document.getElementById("prop-list");
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No proposals yet</div></div>';return}
-    let h="<table><tr><th>ID</th><th>Title</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
+    let h="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
       const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">✓</button><button class="btn btn-den" onclick="den('+p.id+')">✗</button>':"";
-      h+='<tr><td class="q">'+p.id+'</td><td><a href="#" onclick="event.preventDefault();toggleExpand('+p.id+')" style="color:#38BDF8;text-decoration:none;font-size:12px">'+(p.title||"").slice(0,35)+'</a></td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
-      h+='<tr id="expand-'+p.id+'" class="expand"><td colspan="6"><strong>What:</strong> '+(p.what_diff||"-")+'<br><strong>How:</strong> '+(p.how_diff||"-")+'<br><span class="q">'+(p.created_at||"")+'</span></td></tr>';
+      h+='<tr><td class="q">'+p.id+'</td><td class="wrap" style="max-width:150px">'+(p.title||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.what_diff||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.how_diff||"-")+'</td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
     });h+="</table>";el.innerHTML=h;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
 }
@@ -276,9 +337,10 @@ async function den(id){try{await api("/api/proposals/deny/"+id);proposals()}catc
 function knowledge(){
   api("/api/knowledge").then(d=>{
     const el=document.getElementById("knowledge-list");
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No knowledge entries</div></div>';return}
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain knowledge entries</div></div>';return}
     let cats={};d.entries.map(e=>{if(!cats[e.category])cats[e.category]=[];cats[e.category].push(e)});
-    let h="";Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2><table><tr><th>Key</th><th>Content</th></tr>';cats[c].map(e=>{h+='<tr><td class="q" style="white-space:nowrap">'+e.key+'</td><td style="font-size:11px">'+e.content+'</td></tr>'});h+="</table></div>"});
+    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base — endpoints and structure (D1 schema hidden)</p>";
+    Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2>';cats[c].map(e=>{h+='<div style="padding:4px 0;border-bottom:1px solid #0F172A;font-size:12px"><strong style="color:#38BDF8">'+e.key+'</strong><div style="color:#CBD5E1;margin-top:2px;word-break:break-word">'+e.content+'</div></div>'});h+="</div>"});
     el.innerHTML=h;
   }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
 }
@@ -290,7 +352,19 @@ function renderKill(active){
   document.getElementById("kill-status").textContent=active?"Kill Switch: ON":"Kill Switch: OFF";
   const btn=document.getElementById("kill-btn");btn.textContent=active?"Turn OFF":"Turn ON";btn.className="btn-tog "+(active?"btn-on":"btn-off");
 }
-refreshStatus();activity();setInterval(()=>{refreshStatus();PAGES[curTab]&&PAGES[curTab]()},8000);
+async function setMasterCron(){
+  const sel=document.getElementById("cron-select"),v=sel.value;
+  try{await api("/api/master-cron",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(v?{interval_minutes:parseInt(v)}:{active:false})});loadMasterCron()}catch{}
+}
+async function loadMasterCron(){
+  try{
+    const d=await api("/api/master-cron");
+    const sel=document.getElementById("cron-select");
+    if(d.active){sel.value=d.interval_minutes.toString();document.getElementById("cron-hint").textContent="Active: every "+d.interval_minutes+" min";}
+    else{sel.value="";document.getElementById("cron-hint").textContent="Disabled (brain uses 2-min cron)";}
+  }catch{}
+}
+refreshStatus();activity();loadMasterCron();setInterval(()=>{refreshStatus();PAGES[curTab]&&PAGES[curTab]()},8000);
 </script>
 </body>
 </html>`;
