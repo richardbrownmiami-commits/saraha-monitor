@@ -27,15 +27,15 @@ const html = (body, status = 200) => new Response(body, {
   status, headers: { "Content-Type": "text/html;charset=utf-8" }
 });
 
+let _monReady = false;
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
-    try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
-    try {
-      for (const item of MONITOR_SEED) {
-        await env.DB.prepare("INSERT OR REPLACE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run();
-      }
-    } catch {}
+    if (!_monReady) {
+      try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
+      try { for (const item of MONITOR_SEED) { await env.DB.prepare("INSERT OR REPLACE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run(); } } catch {}
+      _monReady = true;
+    }
 
     if (url.pathname === "/status") {
       let dbOk = false, brainOk = false;
