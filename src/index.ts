@@ -137,6 +137,14 @@ export default {
       return json({ entries: r.results });
     }
 
+    if (url.pathname === "/api/logs") {
+      const step = url.searchParams.get("step");
+      let q = "SELECT * FROM brain_logs ORDER BY id DESC LIMIT 100";
+      if (step) q = "SELECT * FROM brain_logs WHERE step=?1 ORDER BY id DESC LIMIT 100";
+      const r = step ? await env.DB.prepare(q).bind(step).all() : await env.DB.prepare(q).all();
+      return json({ entries: r.results });
+    }
+
     if (url.pathname === "/api/master-cron" && req.method === "POST") {
       let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
       const v = body.interval_minutes;
@@ -180,6 +188,34 @@ export default {
     }
 
     return html(DASHBOARD_HTML);
+  },
+  async scheduled(_event, env) {
+    try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
+    try { for (const item of MONITOR_SEED) await env.DB.prepare("INSERT OR REPLACE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run(); } catch {}
+    try {
+      const r = await env.DB.prepare("SELECT value FROM identity WHERE key='healer_state'").all();
+      const state = r.results[0]?.value ? JSON.parse(r.results[0].value) : { failCount: 0, sha: "", content: "" };
+      let healthy = false;
+      try { const h = await env.BRAIN.fetch("https://brain/brain/emotions", { signal: AbortSignal.timeout(10000) }); healthy = h.ok; } catch {}
+      if (healthy) {
+        state.failCount = 0;
+        try {
+          const g = await env.BRAIN.fetch("https://brain/brain/github/read?path=src/index.ts", { signal: AbortSignal.timeout(10000) });
+          if (g.ok) { const d = await g.json(); state.sha = d.sha; state.content = d.content; }
+        } catch {}
+      } else {
+        state.failCount = (state.failCount || 0) + 1;
+      }
+      if (state.failCount >= 3 && state.sha && state.content) {
+        const rb = await env.BRAIN.fetch("https://brain/brain/github/write", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: "healer rollback: brain unhealthy for 3+ checks", content: state.content, sha: state.sha }),
+          signal: AbortSignal.timeout(15000)
+        });
+        state.failCount = 0;
+      }
+      await env.DB.prepare("INSERT INTO identity (key,value,updated_at) VALUES ('healer_state',?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=?1,updated_at=datetime('now')").bind(JSON.stringify(state)).run();
+    } catch {}
   }
 };
 
@@ -260,15 +296,19 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('kill')" id="t-kill">Kill Switch</button>
 <button onclick="showTab('knowledge')" id="t-knowledge">Knowledge</button>
 <button onclick="showTab('prompts')" id="t-prompts">Prompts</button>
+<button onclick="showTab('logs')" id="t-logs">Logs</button>
+<button onclick="showTab('limits')" id="t-limits">Limits</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution â€” Created by Brain</h2><div id="evo-list"></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution ??? Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
 <div id="tab-prompts" class="tab"><div id="prompts-list"></div></div>
+<div id="tab-logs" class="tab"><div id="logs-list"></div></div>
+<div id="tab-limits" class="tab"><div id="limits-list"></div></div>
 <script>
-const PAGES={activity,overview,proposals,knowledge,prompts};
+const PAGES={activity,overview,proposals,knowledge,prompts,logs,limits};
 let curTab="activity",lastCount=0,statusCache={};
 function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
 async function api(p,o){const r=await fetch(p,o||{});if(!r.ok)throw await r.text();return r.json()}
@@ -289,7 +329,7 @@ async function refreshStatus(){
 function activity(){
   api("/api/activity").then(d=>{
     const el=document.getElementById("log-list");
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet â€” waiting for brain cycles...</div></div>';lastCount=0;return}
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet ??? waiting for brain cycles...</div></div>';lastCount=0;return}
     const isNew=d.entries.length>lastCount&&lastCount>0;
     if(isNew)document.getElementById("liveDot").style.background="#F59E0B";
     lastCount=d.entries.length;
@@ -345,7 +385,7 @@ function proposals(){
     let h="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
-      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">âœ“</button><button class="btn btn-den" onclick="den('+p.id+')">âœ—</button>':"";
+      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">???</button><button class="btn btn-den" onclick="den('+p.id+')">???</button>':"";
       h+='<tr><td class="q">'+p.id+'</td><td class="wrap" style="max-width:150px">'+(p.title||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.what_diff||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.how_diff||"-")+'</td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
     });h+="</table>";el.innerHTML=h;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -357,7 +397,7 @@ function knowledge(){
     const el=document.getElementById("knowledge-list");
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain knowledge entries</div></div>';return}
     let cats={};d.entries.map(e=>{if(!cats[e.category])cats[e.category]=[];cats[e.category].push(e)});
-    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base â€” endpoints and structure (D1 schema hidden)</p>";
+    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base ??? endpoints and structure (D1 schema hidden)</p>";
     Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2>';cats[c].map(e=>{h+='<div style="padding:4px 0;border-bottom:1px solid #0F172A;font-size:12px"><strong style="color:#38BDF8">'+e.key+'</strong><div style="color:#CBD5E1;margin-top:2px;word-break:break-word">'+e.content+'</div></div>'});h+="</div>"});
     el.innerHTML=h;
   }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -365,7 +405,7 @@ function knowledge(){
 function prompts(){
   api("/api/prompts").then(d=>{
     const el=document.getElementById("prompts-list");
-    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet â€” waiting for brain proposals...</div></div>';return}
+    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet ??? waiting for brain proposals...</div></div>';return}
     let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Base Prompt</h2><p style="color:#64748B;font-size:11px">'+d.base+'</p></div>';
     if(d.overrides&&d.overrides.length){
       h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Active Overrides ('+d.overrides.length+')</h2>';
@@ -396,6 +436,48 @@ async function loadMasterCron(){
     if(d.active){sel.value=d.interval_minutes.toString();document.getElementById("cron-hint").textContent="Active: every "+d.interval_minutes+" min";}
     else{sel.value="";document.getElementById("cron-hint").textContent="Disabled (brain uses 2-min cron)";}
   }catch{}
+}
+async function logs(){
+  const el=document.getElementById("logs-list");
+  const stepFilter=document.getElementById("log-step-filter")?.value||"";
+  try{
+    const url=stepFilter?"/api/logs?step="+stepFilter:"/api/logs";
+    const d=await api(url);
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain logs found</div></div>';return}
+    let h='<div style="margin-bottom:8px"><select id="log-step-filter" onchange="logs()"><option value="">All steps</option><option value="llm_diag">llm_diag</option><option value="research">research</option><option value="duplicate">duplicate</option><option value="error">error</option><option value="idle">idle</option><option value="skip">skip</option><option value="rest">rest</option><option value="sleep">sleep</option><option value="auto">auto</option></select></div>';
+    h+='<div class="card" style="padding:4px;font-size:11px">'+d.entries.map(e=>{
+      const step=e.step||"-";
+      const time=(e.created_at||"").slice(11,19);
+      const c=(e.content||"").slice(0,300);
+      return '<div class="log-entry"><span class="log-time">'+time+'</span><span class="log-step"><span class="step-badge step-'+step+'">'+step+'</span></span><span class="log-content" style="max-width:none;font-family:monospace;font-size:10px;color:#94A3B8;white-space:pre-wrap;word-break:break-all">'+c+'</span></div>'
+    }).join('')+'</div>';
+    el.innerHTML=h;
+    if(stepFilter)document.getElementById("log-step-filter").value=stepFilter;
+  }catch(){el.innerHTML='<div class="card"><div class="empty">Error loading logs</div></div>'}
+}
+async function limits(){
+  const el=document.getElementById("limits-list");
+  let brainOk=false,dbOk=false;
+  try{const s=await api("/status");brainOk=s.brain;dbOk=s.db}catch{}
+  const rows=[
+    {n:"Brain CPU (10ms budget)",v:brainOk?"Active":"STALLED",lim:"10ms per cycle",s:brainOk?"ok":"critical"},
+    {n:"Brain D1 reads/day",v:"~25/cycle",lim:"5,000,000",s:"ok"},
+    {n:"Brain D1 writes/day",v:"~20/cycle",lim:"100,000",s:"ok"},
+    {n:"Buddhi Dwar KV writes/day",v:"7/request",lim:"1,000",s:"ok"},
+    {n:"Buddhi Dwar KV reads/day",v:"12/request",lim:"100,000",s:"ok"},
+    {n:"GitHub API (authenticated)",v:"~15/hr",lim:"5,000/hr",s:"ok"},
+    {n:"GitHub Actions (private)",v:"~0/mo",lim:"2,000 min/mo",s:"ok"},
+  ];
+  let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:8px">Platform Resource Limits</h2><table><tr><th>Resource</th><th>Usage</th><th>Limit</th><th>Status</th></tr>';
+  for(const r of rows){
+    const cls=r.s;
+    h+='<tr><td style="padding:6px 8px">'+r.n+'</td><td style="padding:6px 8px;color:#94A3B8;font-size:12px">'+r.v+'</td><td style="padding:6px 8px;color:#64748B;font-size:12px">'+r.lim+'</td><td style="padding:6px 8px"><span class="badge badge-'+(cls==="ok"?"executed":"denied")+'">'+(cls==="ok"?"??? Ok":"???? Critical")+'</span></td></tr>';
+  }
+  h+='</table></div>';
+  h+='<div class="row"><div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">Brain Health</h2><div style="font-size:14px;color:'+(brainOk?"#22C55E":"#EF4444")+'">'+(brainOk?"??? Alive":"??? Down")+'</div><div style="font-size:11px;color:#64748B;margin-top:4px">DB: '+(dbOk?"ok":"error")+'</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">KV Writes (Buddhi Dwar)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">1,000</div><div style="font-size:11px;color:#64748B">daily limit ?? 7 writes/req</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">D1 Writes (Brain)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">100K</div><div style="font-size:11px;color:#64748B">daily limit ?? ~20 writes/cycle</div></div></div>';
+  el.innerHTML=h;
 }
 refreshStatus();activity();loadMasterCron();setInterval(()=>{refreshStatus();PAGES[curTab]&&PAGES[curTab]()},8000);
 </script>
