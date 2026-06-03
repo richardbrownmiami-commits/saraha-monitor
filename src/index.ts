@@ -190,6 +190,7 @@ export default {
     return html(DASHBOARD_HTML);
   },
   async scheduled(_event, env) {
+    try { await env.DB.prepare("SELECT 1").run(); } catch {} // keep D1 warm
     try { for (const s of MONITOR_TABLES) await env.DB.exec(s); } catch {}
     try { for (const item of MONITOR_SEED) await env.DB.prepare("INSERT OR REPLACE INTO monitor_knowledge (key, content, category) VALUES (?1, ?2, ?3)").bind(item.k, item.c, item.cat).run(); } catch {}
     try {
@@ -300,7 +301,7 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('limits')" id="t-limits">Limits</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution ??? Created by Brain</h2><div id="evo-list"></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
 <div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
@@ -329,7 +330,7 @@ async function refreshStatus(){
 function activity(){
   api("/api/activity").then(d=>{
     const el=document.getElementById("log-list");
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet ??? waiting for brain cycles...</div></div>';lastCount=0;return}
+    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet — waiting for brain cycles...</div></div>';lastCount=0;return}
     const isNew=d.entries.length>lastCount&&lastCount>0;
     if(isNew)document.getElementById("liveDot").style.background="#F59E0B";
     lastCount=d.entries.length;
@@ -385,7 +386,7 @@ function proposals(){
     let h="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
-      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">???</button><button class="btn btn-den" onclick="den('+p.id+')">???</button>':"";
+      const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">✓</button><button class="btn btn-den" onclick="den('+p.id+')">✗</button>':"";
       h+='<tr><td class="q">'+p.id+'</td><td class="wrap" style="max-width:150px">'+(p.title||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.what_diff||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.how_diff||"-")+'</td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
     });h+="</table>";el.innerHTML=h;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -397,7 +398,7 @@ function knowledge(){
     const el=document.getElementById("knowledge-list");
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain knowledge entries</div></div>';return}
     let cats={};d.entries.map(e=>{if(!cats[e.category])cats[e.category]=[];cats[e.category].push(e)});
-    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base ??? endpoints and structure (D1 schema hidden)</p>";
+    let h="<p style='color:#64748B;font-size:11px;margin-bottom:8px'>Brain's knowledge base — endpoints and structure (D1 schema hidden)</p>";
     Object.keys(cats).sort().map(c=>{h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px;text-transform:capitalize">'+c+'</h2>';cats[c].map(e=>{h+='<div style="padding:4px 0;border-bottom:1px solid #0F172A;font-size:12px"><strong style="color:#38BDF8">'+e.key+'</strong><div style="color:#CBD5E1;margin-top:2px;word-break:break-word">'+e.content+'</div></div>'});h+="</div>"});
     el.innerHTML=h;
   }).catch(()=>document.getElementById("knowledge-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
@@ -405,7 +406,7 @@ function knowledge(){
 function prompts(){
   api("/api/prompts").then(d=>{
     const el=document.getElementById("prompts-list");
-    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet ??? waiting for brain proposals...</div></div>';return}
+    if(!d.changes||!d.changes.length){el.innerHTML='<div class="card"><div class="empty">No evolution changes yet — waiting for brain proposals...</div></div>';return}
     let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Base Prompt</h2><p style="color:#64748B;font-size:11px">'+d.base+'</p></div>';
     if(d.overrides&&d.overrides.length){
       h+='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Active Overrides ('+d.overrides.length+')</h2>';
@@ -471,12 +472,12 @@ async function limits(){
   let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:8px">Platform Resource Limits</h2><table><tr><th>Resource</th><th>Usage</th><th>Limit</th><th>Status</th></tr>';
   for(const r of rows){
     const cls=r.s;
-    h+='<tr><td style="padding:6px 8px">'+r.n+'</td><td style="padding:6px 8px;color:#94A3B8;font-size:12px">'+r.v+'</td><td style="padding:6px 8px;color:#64748B;font-size:12px">'+r.lim+'</td><td style="padding:6px 8px"><span class="badge badge-'+(cls==="ok"?"executed":"denied")+'">'+(cls==="ok"?"??? Ok":"???? Critical")+'</span></td></tr>';
+    h+='<tr><td style="padding:6px 8px">'+r.n+'</td><td style="padding:6px 8px;color:#94A3B8;font-size:12px">'+r.v+'</td><td style="padding:6px 8px;color:#64748B;font-size:12px">'+r.lim+'</td><td style="padding:6px 8px"><span class="badge badge-'+(cls==="ok"?"executed":"denied")+'">'+(cls==="ok"?"✅ Ok":"🔴 Critical")+'</span></td></tr>';
   }
   h+='</table></div>';
-  h+='<div class="row"><div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">Brain Health</h2><div style="font-size:14px;color:'+(brainOk?"#22C55E":"#EF4444")+'">'+(brainOk?"??? Alive":"??? Down")+'</div><div style="font-size:11px;color:#64748B;margin-top:4px">DB: '+(dbOk?"ok":"error")+'</div></div>';
-  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">KV Writes (Buddhi Dwar)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">1,000</div><div style="font-size:11px;color:#64748B">daily limit ?? 7 writes/req</div></div>';
-  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">D1 Writes (Brain)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">100K</div><div style="font-size:11px;color:#64748B">daily limit ?? ~20 writes/cycle</div></div></div>';
+  h+='<div class="row"><div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">Brain Health</h2><div style="font-size:14px;color:'+(brainOk?"#22C55E":"#EF4444")+'">'+(brainOk?"● Alive":"● Down")+'</div><div style="font-size:11px;color:#64748B;margin-top:4px">DB: '+(dbOk?"ok":"error")+'</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">KV Writes (Buddhi Dwar)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">1,000</div><div style="font-size:11px;color:#64748B">daily limit · 7 writes/req</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">D1 Writes (Brain)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">100K</div><div style="font-size:11px;color:#64748B">daily limit · ~20 writes/cycle</div></div></div>';
   el.innerHTML=h;
 }
 refreshStatus();activity();loadMasterCron();setInterval(()=>{refreshStatus();PAGES[curTab]&&PAGES[curTab]()},8000);

@@ -11,3 +11,6 @@ database_id = "4e4e5fde-2207-478a-b1ed-d55d6cc35a91"
 [[services]]
 binding = "BRAIN"
 service = "saraha-brain"
+
+[triggers]
+crons = ["*/1 * * * *"]
