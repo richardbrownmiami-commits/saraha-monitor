@@ -80,11 +80,22 @@ export default {
       return json({ active: r.results[0]?.value === "true" });
     }
 
+    if (url.pathname === "/api/proposals/create" && req.method === "POST") {
+      let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      if (!body.title) return json({ error: "title required" }, 400);
+      const r = await env.DB.prepare("INSERT INTO proposals (title,what_diff,how_diff,resource_type,risk_pct,status) VALUES (?1,?2,?3,?4,?5,'pending') RETURNING id").bind(body.title, body.what||"", body.how||"", body.type||"core_architecture", body.risk||0).all();
+      return json({ ok: true, id: r.results[0].id });
+    }
+
     if (url.pathname === "/api/proposals") {
       const status = url.searchParams.get("status");
-      let q = "SELECT * FROM proposals ORDER BY created_at DESC LIMIT 50";
-      if (status) q = "SELECT * FROM proposals WHERE status=?1 ORDER BY created_at DESC LIMIT 50";
-      const r = status ? await env.DB.prepare(q).bind(status).all() : await env.DB.prepare(q).all();
+      const type = url.searchParams.get("type");
+      let q, params = [];
+      if (status && type) { q = "SELECT * FROM proposals WHERE status=?1 AND resource_type=?2 ORDER BY created_at DESC LIMIT 50"; params = [status, type]; }
+      else if (status) { q = "SELECT * FROM proposals WHERE status=?1 ORDER BY created_at DESC LIMIT 50"; params = [status]; }
+      else if (type) { q = "SELECT * FROM proposals WHERE resource_type=?1 ORDER BY created_at DESC LIMIT 50"; params = [type]; }
+      else { q = "SELECT * FROM proposals ORDER BY created_at DESC LIMIT 50"; }
+      const r = params.length ? await env.DB.prepare(q).bind(...params).all() : await env.DB.prepare(q).all();
       return json({ entries: r.results });
     }
 
@@ -145,6 +156,24 @@ export default {
       return json({ entries: r.results });
     }
 
+    if (url.pathname === "/api/logs/cleanup" && req.method === "POST") {
+      let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const before = body.before;
+      if (!before) return json({ error: "before date required" }, 400);
+      let q = "DELETE FROM brain_logs WHERE created_at < ?1";
+      const params = [before];
+      if (body.step) { q += " AND step=?2"; params.push(body.step); }
+      await env.DB.prepare(q).bind(...params).run();
+      return json({ ok: true, deleted_before: before });
+    }
+
+    if (url.pathname === "/api/activity/cleanup" && req.method === "POST") {
+      let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const before = body.before || "2026-06-01";
+      await env.DB.prepare("DELETE FROM brain_logs WHERE created_at < ?1 AND step IN ('auto','propose','research','duplicate','executor','error')").bind(before).run();
+      return json({ ok: true, deleted_before: before });
+    }
+
     if (url.pathname === "/api/master-cron" && req.method === "POST") {
       let body; try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
       const v = body.interval_minutes;
@@ -169,6 +198,56 @@ export default {
       return json({ count: c.results[0]?.total || 0, entries: items.results });
     }
 
+    if (url.pathname === "/api/brain-phase") {
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/phase");
+        if (r.ok) return json(await r.json());
+      } catch {}
+      return json({ phase: "unknown", emotions: {}, energy: 0 });
+    }
+
+    if (url.pathname === "/api/brain-override") {
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/override");
+        if (r.ok) return json(await r.json());
+      } catch {}
+      return json({ active: false });
+    }
+
+    if (url.pathname === "/api/brain-wake" && req.method === "POST") {
+      let body, duration = 60;
+      try { body = await req.json(); duration = parseInt(body?.duration_minutes) || 60; } catch {}
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/wake", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ duration_minutes: duration })
+        });
+        if (r.ok) return json(await r.json());
+        return json({ error: "brain wake failed" }, 502);
+      } catch { return json({ error: "brain unreachable" }, 502); }
+    }
+
+    if (url.pathname === "/api/brain-sleep" && req.method === "POST") {
+      let body, duration = 60;
+      try { body = await req.json(); duration = parseInt(body?.duration_minutes) || 60; } catch {}
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/sleep", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ duration_minutes: duration })
+        });
+        if (r.ok) return json(await r.json());
+        return json({ error: "brain sleep failed" }, 502);
+      } catch { return json({ error: "brain unreachable" }, 502); }
+    }
+
+    if (url.pathname === "/api/brain-clear-override" && req.method === "POST") {
+      try {
+        const r = await env.BRAIN.fetch("https://brain/brain/clear-override", { method: "POST" });
+        if (r.ok) return json(await r.json());
+      } catch {}
+      return json({ ok: true });
+    }
+
     if (url.pathname === "/api/knowledge") {
       let results;
       try {
@@ -185,6 +264,10 @@ export default {
         if (r.ok) return json(await r.json());
       } catch {}
       return json({ base: "", overrides: [], changes: [] });
+    }
+
+    if (url.pathname === "/diag") {
+      return html('<!DOCTYPE html><html><body><h1>Monitor Diagnostics</h1><div id="status">Loading...</div><script>document.getElementById("status").textContent="JS works: "+new Date().toLocaleString();fetch("/status").then(function(r){return r.json()}).then(function(d){document.getElementById("status").textContent+=" | API: alive="+d.alive+" brain="+d.brain}).catch(function(e){document.getElementById("status").textContent+=" | API error: "+e})<'+'/script></body></html>');
     }
 
     return html(DASHBOARD_HTML);
@@ -301,15 +384,15 @@ pre{background:#0F172A;padding:10px;border-radius:6px;font-size:11px;color:#6474
 <button onclick="showTab('limits')" id="t-limits">Limits</button>
 </div>
 <div id="tab-activity" class="tab active"><div id="log-list"></div></div>
-<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
+<div id="tab-overview" class="tab"><div class="row" id="stats"></div><div class="card" id="cron-card" style="font-size:12px;padding:8px 12px;color:#94A3B8"></div><div class="row"><div class="card" id="phase-card" style="flex:1;min-width:160px;text-align:center"></div><div class="card" style="flex:1;min-width:200px" id="emotion-box"></div><div class="card" style="flex:2;min-width:300px"><h2 style="font-size:13px;color:#64748B;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Cycles</h2><div id="recent-activity"></div></div></div><div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:6px">Evolution — Created by Brain</h2><div id="evo-list"></div></div></div>
 <div id="tab-proposals" class="tab"><div id="prop-list"></div></div>
-<div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
+<div id="tab-kill" class="tab"><div class="card" style="text-align:center;padding:20px"><h2 style="font-size:16px;margin-bottom:12px" id="kill-status">Kill Switch</h2><p style="color:#64748B;font-size:12px;margin-bottom:16px">When active, the brain skips all idle cycles.</p><button id="kill-btn" class="btn-tog" onclick="toggleKill()">Loading...</button></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Brain Phase Control</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override the brain's phase manually. Override auto-expires after the set duration.</p><div id="override-status" style="font-size:12px;color:#94A3B8;margin-bottom:8px"></div><div class="cron-opt"><select id="duration-select"><option value="15">15 min</option><option value="30">30 min</option><option value="60" selected>1 hr</option><option value="120">2 hrs</option><option value="360">6 hrs</option><option value="720">12 hrs</option></select><button class="btn btn-app" onclick="wakeBrain()" style="padding:6px 16px;font-size:12px">Wake Brain</button><button class="btn btn-den" onclick="sleepBrain()" style="padding:6px 16px;font-size:12px">Put to Sleep</button><button class="btn" onclick="clearOverride()" style="padding:6px 12px;font-size:12px;background:#475569;color:#FFF">Clear Override</button></div></div><div class="card" style="padding:20px"><h2 style="font-size:14px;margin-bottom:8px">Master Cron</h2><p style="color:#64748B;font-size:12px;margin-bottom:12px">Override brain's idle cycle interval. Brain cannot change this while active.</p><div class="cron-opt"><select id="cron-select"><option value="">Disabled</option><option value="1">1 min</option><option value="2">2 min</option><option value="4">4 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hr</option><option value="120">2 hrs</option><option value="300">5 hrs</option></select><button class="btn btn-app" onclick="setMasterCron()">Apply</button><span class="hint" id="cron-hint"></span></div></div></div>
 <div id="tab-knowledge" class="tab"><div id="knowledge-list"></div></div>
 <div id="tab-prompts" class="tab"><div id="prompts-list"></div></div>
 <div id="tab-logs" class="tab"><div id="logs-list"></div></div>
 <div id="tab-limits" class="tab"><div id="limits-list"></div></div>
 <script>
-const PAGES={activity,overview,proposals,knowledge,prompts,logs,limits};
+const PAGES={activity,overview,proposals,knowledge,prompts,logs,limits,kill};
 let curTab="activity",lastCount=0,statusCache={};
 function showTab(n){curTab=n;document.querySelectorAll(".tab").forEach(e=>e.classList.remove("active"));document.getElementById("tab-"+n).classList.add("active");document.querySelectorAll(".nav button").forEach(e=>e.classList.remove("active"));document.getElementById("t-"+n).classList.add("active");PAGES[n]()}
 async function api(p,o){const r=await fetch(p,o||{});if(!r.ok)throw await r.text();return r.json()}
@@ -327,14 +410,21 @@ async function refreshStatus(){
     document.getElementById("liveDot").style.background=s.brain&&s.db?'#10B981':'#EF4444';
   }catch(e){document.getElementById("statusBar").innerHTML='<span class="s-pill"><span class="s-dot off"></span>Status error</span>'}
 }
+async function cleanupActivity(){
+  const days = prompt("Delete activity entries older than how many days?", "7");
+  if (!days || isNaN(days)) return;
+  const d = new Date(); d.setDate(d.getDate() - parseInt(days));
+  const before = d.toISOString().slice(0,10);
+  try { await fetch("/api/activity/cleanup", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({before})}); activity(); } catch {}
+}
 function activity(){
   api("/api/activity").then(d=>{
     const el=document.getElementById("log-list");
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No activity yet — waiting for brain cycles...</div></div>';lastCount=0;return}
+    if(!d.entries||!d.entries.length){el.innerHTML='<div style="margin-bottom:8px"><button class="btn btn-den" onclick="cleanupActivity()" style="padding:4px 12px;font-size:11px">Cleanup Old Activity</button></div><div class="card"><div class="empty">No activity yet — waiting for brain cycles...</div></div>';lastCount=0;return}
     const isNew=d.entries.length>lastCount&&lastCount>0;
     if(isNew)document.getElementById("liveDot").style.background="#F59E0B";
     lastCount=d.entries.length;
-    el.innerHTML='<div class="card" style="padding:8px">'+d.entries.map(e=>{
+    el.innerHTML='<div style="margin-bottom:8px"><button class="btn btn-den" onclick="cleanupActivity()" style="padding:4px 12px;font-size:11px">Cleanup Old Activity</button></div><div class="card" style="padding:8px">'+d.entries.map(e=>{
       const step=e.step||"idle";
       const time=(e.created_at||"").slice(11,19);
       const src=e.action_id?'#'+e.action_id:'';
@@ -371,6 +461,17 @@ function overview(){
         '<div class="eg"><div class="efill" style="width:'+(d.emotions.energy||0)+'%"></div></div>'+
         '<div style="font-size:11px;color:#64748B;margin-top:2px">'+(d.emotions.energy||0)+'% &middot; confidence '+(d.emotions.confidence||0)+'%</div>';
     }
+    api("/api/brain-phase").then(bp=>{
+      const pc=document.getElementById("phase-card");
+      if(!pc)return;
+      const phase=bp.phase||"unknown";
+      const cls={sleeping:"#6366F1",awake:"#10B981",curious:"#F59E0B",tired:"#EF4444",unknown:"#64748B"};
+      const icon={sleeping:"\u{1F634}",awake:"\u{1F4A1}",curious:"\u{1F50D}",tired:"\u{1F4A4}",unknown:"?"};
+      pc.innerHTML='<div style="font-size:11px;color:#64748B;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Brain Phase</div>'+
+        '<div style="font-size:36px;line-height:1.2">'+(icon[phase]||"?")+'</div>'+
+        '<div style="font-size:16px;font-weight:700;color:'+(cls[phase]||"#64748B")+'">'+phase+'</div>'+
+        '<div style="font-size:10px;color:#475569;margin-top:4px">energy '+(bp.energy||0)+'%</div>';
+    }).catch(()=>{});
     api("/api/evolution").then(ev=>{
       const el=document.getElementById("evo-list");
       if(!ev.entries||!ev.entries.length){el.innerHTML='<div class="empty">Nothing evolved yet</div>';return}
@@ -379,16 +480,22 @@ function overview(){
     }).catch(()=>{})
   }).catch(()=>document.getElementById("stats").innerHTML='<div class="empty">Failed to load</div>')
 }
-function proposals(){
-  api("/api/proposals").then(d=>{
+function proposals(type){
+  const TYPES = ["","core_architecture","tool_code","prompt_change"];
+  const sel = document.getElementById("prop-type-filter");
+  if (!type && sel) type = sel.value;
+  const url = type ? "/api/proposals?type="+type : "/api/proposals";
+  api(url).then(d=>{
     const el=document.getElementById("prop-list");
     if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No proposals yet</div></div>';return}
-    let h="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
+    let h='<div style="margin-bottom:8px"><select id="prop-type-filter" onchange="proposals(this.value)"><option value="">All types</option>'+TYPES.filter(t=>t).map(t=>'<option value="'+t+'"'+(type===t?' selected':'')+'>'+t+'</option>').join('')+'</select></div>';
+    h+="<table><tr><th>ID</th><th>Title</th><th>What</th><th>How</th><th>Type</th><th>Risk</th><th>Status</th><th></th></tr>";
     d.entries.map(p=>{
       const rc=p.risk_pct>60?"risk-h":p.risk_pct>30?"risk-m":"risk-l";
       const ab=p.status==="pending"?'<button class="btn btn-app" onclick="app('+p.id+')">✓</button><button class="btn btn-den" onclick="den('+p.id+')">✗</button>':"";
       h+='<tr><td class="q">'+p.id+'</td><td class="wrap" style="max-width:150px">'+(p.title||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.what_diff||"-")+'</td><td class="wrap" style="max-width:200px">'+(p.how_diff||"-")+'</td><td><span class="badge">'+(p.resource_type||"-")+'</span></td><td><span class="risk '+rc+'">'+(p.risk_pct||0)+'</span></td><td><span class="badge badge-'+p.status+'">'+p.status+'</span></td><td>'+ab+'</td></tr>';
     });h+="</table>";el.innerHTML=h;
+    if (sel) sel.value = type;
   }).catch(()=>document.getElementById("prop-list").innerHTML='<div class="card"><div class="empty">Error loading</div></div>')
 }
 async function app(id){try{await api("/api/proposals/approve/"+id);proposals()}catch{}}
@@ -438,14 +545,46 @@ async function loadMasterCron(){
     else{sel.value="";document.getElementById("cron-hint").textContent="Disabled (brain uses 2-min cron)";}
   }catch{}
 }
+async function wakeBrain(){
+  const sel=document.getElementById("duration-select"),v=parseInt(sel.value);
+  try{await fetch("/api/brain-wake",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({duration_minutes:v})});loadOverrideStatus()}catch{}
+}
+async function sleepBrain(){
+  const sel=document.getElementById("duration-select"),v=parseInt(sel.value);
+  try{await fetch("/api/brain-sleep",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({duration_minutes:v})});loadOverrideStatus()}catch{}
+}
+async function clearOverride(){
+  try{await fetch("/api/brain-clear-override",{method:"POST"});loadOverrideStatus()}catch{}
+}
+async function loadOverrideStatus(){
+  try{
+    const d=await api("/api/brain-override");
+    const el=document.getElementById("override-status");
+    if(d.active){
+      const mins=Math.round(d.remainingMs/60000);
+      el.innerHTML='<span style="color:#F59E0B">Override active: <strong>'+d.phase+'</strong> &middot; expires in ~'+mins+' min</span>';
+    }else{
+      el.innerHTML='<span style="color:#64748B">No override active &mdash; brain uses natural phase cycle</span>';
+    }
+  }catch{}
+}
+async function cleanupLogs(){
+  const days = prompt("Delete logs older than how many days?", "7");
+  if (!days || isNaN(days)) return;
+  const d = new Date(); d.setDate(d.getDate() - parseInt(days));
+  const before = d.toISOString().slice(0,10);
+  const step = document.getElementById("log-step-filter")?.value||"";
+  const body = step ? {before, step} : {before};
+  try { await fetch("/api/logs/cleanup", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); logs(); } catch {}
+}
 async function logs(){
   const el=document.getElementById("logs-list");
   const stepFilter=document.getElementById("log-step-filter")?.value||"";
   try{
     const url=stepFilter?"/api/logs?step="+stepFilter:"/api/logs";
     const d=await api(url);
-    if(!d.entries||!d.entries.length){el.innerHTML='<div class="card"><div class="empty">No brain logs found</div></div>';return}
-    let h='<div style="margin-bottom:8px"><select id="log-step-filter" onchange="logs()"><option value="">All steps</option><option value="llm_diag">llm_diag</option><option value="research">research</option><option value="duplicate">duplicate</option><option value="error">error</option><option value="idle">idle</option><option value="skip">skip</option><option value="rest">rest</option><option value="sleep">sleep</option><option value="auto">auto</option></select></div>';
+    if(!d.entries||!d.entries.length){el.innerHTML='<div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><select id="log-step-filter" onchange="logs()"><option value="">All steps</option><option value="llm_diag">llm_diag</option><option value="research">research</option><option value="duplicate">duplicate</option><option value="error">error</option><option value="idle">idle</option><option value="skip">skip</option><option value="rest">rest</option><option value="sleep">sleep</option><option value="auto">auto</option></select><button class="btn btn-den" onclick="cleanupLogs()" style="padding:4px 12px;font-size:11px">Cleanup Old Logs</button></div><div class="card"><div class="empty">No brain logs found</div></div>';return}
+    let h='<div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><select id="log-step-filter" onchange="logs()"><option value="">All steps</option><option value="llm_diag">llm_diag</option><option value="research">research</option><option value="duplicate">duplicate</option><option value="error">error</option><option value="idle">idle</option><option value="skip">skip</option><option value="rest">rest</option><option value="sleep">sleep</option><option value="auto">auto</option></select><button class="btn btn-den" onclick="cleanupLogs()" style="padding:4px 12px;font-size:11px">Cleanup Old Logs</button></div>';
     h+='<div class="card" style="padding:4px;font-size:11px">'+d.entries.map(e=>{
       const step=e.step||"-";
       const time=(e.created_at||"").slice(11,19);
@@ -454,7 +593,12 @@ async function logs(){
     }).join('')+'</div>';
     el.innerHTML=h;
     if(stepFilter)document.getElementById("log-step-filter").value=stepFilter;
-  }catch(){el.innerHTML='<div class="card"><div class="empty">Error loading logs</div></div>'}
+  }catch{el.innerHTML='<div class="card"><div class="empty">Error loading logs</div></div>'}
+}
+function kill(){
+  loadOverrideStatus();
+  renderKill(statusCache.kill);
+  loadMasterCron();
 }
 async function limits(){
   const el=document.getElementById("limits-list");
@@ -472,15 +616,17 @@ async function limits(){
   let h='<div class="card"><h2 style="font-size:13px;color:#38BDF8;margin-bottom:8px">Platform Resource Limits</h2><table><tr><th>Resource</th><th>Usage</th><th>Limit</th><th>Status</th></tr>';
   for(const r of rows){
     const cls=r.s;
-    h+='<tr><td style="padding:6px 8px">'+r.n+'</td><td style="padding:6px 8px;color:#94A3B8;font-size:12px">'+r.v+'</td><td style="padding:6px 8px;color:#64748B;font-size:12px">'+r.lim+'</td><td style="padding:6px 8px"><span class="badge badge-'+(cls==="ok"?"executed":"denied")+'">'+(cls==="ok"?"✅ Ok":"🔴 Critical")+'</span></td></tr>';
+    h+='<tr><td style="padding:6px 8px">'+r.n+'</td><td style="padding:6px 8px;color:#94A3B8;font-size:12px">'+r.v+'</td><td style="padding:6px 8px;color:#64748B;font-size:12px">'+r.lim+'</td><td style="padding:6px 8px"><span class="badge badge-'+(cls==="ok"?"executed":"denied")+'">'+(cls==="ok"?"\u2705 Ok":"\uD83D\uDD34 Critical")+'</span></td></tr>';
   }
   h+='</table></div>';
-  h+='<div class="row"><div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">Brain Health</h2><div style="font-size:14px;color:'+(brainOk?"#22C55E":"#EF4444")+'">'+(brainOk?"● Alive":"● Down")+'</div><div style="font-size:11px;color:#64748B;margin-top:4px">DB: '+(dbOk?"ok":"error")+'</div></div>';
-  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">KV Writes (Buddhi Dwar)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">1,000</div><div style="font-size:11px;color:#64748B">daily limit · 7 writes/req</div></div>';
-  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">D1 Writes (Brain)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">100K</div><div style="font-size:11px;color:#64748B">daily limit · ~20 writes/cycle</div></div></div>';
+  h+='<div class="row"><div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">Brain Health</h2><div style="font-size:14px;color:'+(brainOk?"#22C55E":"#EF4444")+'">'+(brainOk?"\u25CF Alive":"\u25CF Down")+'</div><div style="font-size:11px;color:#64748B;margin-top:4px">DB: '+(dbOk?"ok":"error")+'</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">KV Writes (Buddhi Dwar)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">1,000</div><div style="font-size:11px;color:#64748B">daily limit \u00B7 7 writes/req</div></div>';
+  h+='<div class="card" style="flex:1"><h2 style="font-size:12px;color:#64748B;margin-bottom:6px">D1 Writes (Brain)</h2><div style="font-size:24px;font-weight:bold;color:#22C55E">100K</div><div style="font-size:11px;color:#64748B">daily limit \u00B7 ~20 writes/cycle</div></div></div>';
   el.innerHTML=h;
 }
 refreshStatus();activity();loadMasterCron();setInterval(()=>{refreshStatus();PAGES[curTab]&&PAGES[curTab]()},8000);
 </script>
 </body>
-</html>`;
+</html>
+`;
+
